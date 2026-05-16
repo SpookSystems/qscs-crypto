@@ -1,0 +1,13 @@
+# Editor / OS junk
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+
+# Local scratch
+/tmp/
+*.bak
+*.bak-*
+
+# No build artifacts: dist/ IS the deliverable and is committed.
