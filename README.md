@@ -177,4 +177,4 @@ together; treat them as a pair when you upgrade.
 
 ## Licence
 
-See `LICENCE`.
+MIT. See [LICENSE](LICENSE).
