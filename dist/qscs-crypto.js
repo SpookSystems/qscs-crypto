@@ -28,11 +28,9 @@
   var STORE = 'kv';
   var WRAP_ALG = { name: 'AES-GCM', length: 256 };
   var WRAP_IV_BYTES = 12;
-  // Override by setting window.QSCS_WASM_URL = '/custom/path/qscs-substrate.wasm'
-  // BEFORE this script tag (or any other script that touches window.qscsCrypto).
-  var WASM_URL = (typeof window.QSCS_WASM_URL === 'string' && window.QSCS_WASM_URL)
-    ? window.QSCS_WASM_URL
-    : '/wasm/qscs-substrate.wasm';
+  var WASM_URL = '/wasm/qscs-substrate.wasm';
+  var READY_PROMISE_TIMEOUT_MS = 2500;
+  var INIT_FETCH_WAIT_MS = 4000;
 
   // Origin host for the canonical message.  Must match what the server
   // sees in the Host header (no port for default 80/443).
@@ -73,6 +71,29 @@
         tx.onerror    = function () { reject(tx.error); };
       });
     });
+  }
+
+  function dbDelete(key) {
+    return openDb().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(STORE, 'readwrite');
+        tx.objectStore(STORE).delete(key);
+        tx.oncomplete = function () { resolve(); };
+        tx.onerror    = function () { reject(tx.error); };
+      });
+    });
+  }
+
+  // Wipe persisted identity material.  Used when the stored blob can no
+  // longer be decrypted by the stored wrap key (e.g. iOS Safari evicts
+  // one of the two records independently, or the substrate format has
+  // changed across deploys).  After wipe, the next bootstrap regenerates
+  // a fresh identity and the user re-logs in.
+  function wipeIdentity() {
+    return Promise.all([
+      dbDelete('blob').catch(function () {}),
+      dbDelete('wrapKey').catch(function () {})
+    ]);
   }
 
   /* ── Wrap key bootstrap ─────────────────────────── */
@@ -168,9 +189,22 @@
           var rc = exports.qscs_identity_load_blob(ptr, plain.length);
           if (rc !== 0) {
             // Persisted blob unusable; regenerate and overwrite.
+            console.warn('[qscs] stored blob rejected by WASM (rc=' + rc + '), regenerating');
             return generateAndPersist(exports, wrapKey);
           }
           return null;
+        }, function (err) {
+          // Decrypt failure — wrap key no longer matches the stored blob.
+          // This happens on iOS Safari when one of the two IndexedDB rows
+          // is evicted independently, after a format change, or after
+          // any storage-partition reshuffle.  Wipe both records so the
+          // outer init re-runs from scratch.
+          console.warn('[qscs] stored blob decrypt failed, wiping and regenerating:', err);
+          return wipeIdentity().then(function () {
+            // Regenerate inline with the *current* wrapKey we have in hand.
+            // (loadOrCreateWrapKey will pick up the fresh one on next page load.)
+            return generateAndPersist(exports, wrapKey);
+          });
         });
       }
       return generateAndPersist(exports, wrapKey);
@@ -212,6 +246,13 @@
     pubkeyHexCached     = readHex(exportsRef.qscs_get_pubkey_hex, 64);
   }
 
+  // True iff the WASM substrate has a loaded identity and we have a
+  // non-empty cached UUID hex.  Used as a precondition by signedFetch
+  // to decide whether to self-heal before sending.
+  function identityReady() {
+    return !!clientUuidHexCached && clientUuidHexCached.length === 32;
+  }
+
   function bodyToString(body) {
     if (body == null) return '';
     if (typeof body === 'string') return body;
@@ -224,6 +265,9 @@
   }
 
   function signRequest(method, uri, body) {
+    if (!identityReady()) {
+      throw new Error('qscs identity not ready (empty client uuid)');
+    }
     var host = canonicalHost();
     var bodyStr = bodyToString(body);
 
@@ -281,6 +325,34 @@
 
   var origFetch = window.fetch.bind(window);
 
+  // One-shot self-heal guard: once per page load we are willing to wipe
+  // IndexedDB and re-bootstrap.  Without this guard, a persistent fault
+  // could cause an infinite re-init loop on every fetch.
+  var selfHealUsed = false;
+  var selfHealPromise = null;
+
+  function selfHeal(reason) {
+    if (selfHealPromise) return selfHealPromise;
+    if (selfHealUsed) {
+      return Promise.reject(new Error('qscs self-heal already used'));
+    }
+    selfHealUsed = true;
+    console.warn('[qscs] self-healing identity:', reason);
+    selfHealPromise = wipeIdentity().then(function () {
+      // Re-run wrap-key + identity bootstrap against the (now empty)
+      // store.  exportsRef is already populated from the original init.
+      return loadOrCreateWrapKey().then(function (wrapKey) {
+        return bootstrapIdentity(exportsRef, wrapKey).then(function () {
+          refreshCache();
+          if (!identityReady()) {
+            throw new Error('self-heal did not produce a usable identity');
+          }
+        });
+      });
+    });
+    return selfHealPromise;
+  }
+
   function signedFetch(input, init) {
     init = init || {};
     var url, method, body;
@@ -307,40 +379,145 @@
       return origFetch(input, init);
     }
 
+    // Never route substrate bootstrap through signedFetch; that can
+    // deadlock init if window.fetch is already monkey-patched.
+    if (url === WASM_URL || url.startsWith(WASM_URL + '?')) {
+      return origFetch(input, init);
+    }
+
+    // /auth/status must never block on crypto bootstrap, but it does need
+    // X-QSCS-Client-Uuid so the backend can resolve the current identity.
+    if (url === '/auth/status' || url.startsWith('/auth/status?')) {
+      var statusHeaders = new Headers(init.headers || (typeof input !== 'string' ? input.headers : undefined) || {});
+      if (clientUuidHexCached) statusHeaders.set('X-QSCS-Client-Uuid', clientUuidHexCached);
+      return origFetch(input, Object.assign({}, init, { headers: statusHeaders }));
+    }
+
+    var requiresIdentity =
+      url.startsWith('/api/') ||
+      url === '/auth/login' ||
+      url.startsWith('/auth/login?') ||
+      url === '/auth/logout' ||
+      url.startsWith('/auth/logout?');
+
     var doSigned = function () {
+      var headers = signRequest(method, url, body);
+      var mergedHeaders = new Headers(init.headers || (typeof input !== 'string' ? input.headers : undefined) || {});
+      Object.keys(headers).forEach(function (k) { mergedHeaders.set(k, headers[k]); });
+      var newInit = Object.assign({}, init, { headers: mergedHeaders });
+      return origFetch(input, newInit);
+    };
+
+    // Attempt signing; if identity is missing (e.g. init failed silently
+    // on this device — observed on iOS Safari after IndexedDB partition
+    // eviction), self-heal once and retry before falling back to an
+    // unsigned request.  Falling back to unsigned would produce a 401
+    // "not authenticated" from the gate and the SPA would render free-
+    // tier defaults, which is the bug we are fixing.
+    var attempt = function () {
       try {
-        var headers = signRequest(method, url, body);
-        var mergedHeaders = new Headers(init.headers || (typeof input !== 'string' ? input.headers : undefined) || {});
-        Object.keys(headers).forEach(function (k) { mergedHeaders.set(k, headers[k]); });
-        var newInit = Object.assign({}, init, { headers: mergedHeaders });
-        return origFetch(input, newInit);
+        return doSigned();
       } catch (e) {
-        console.warn('[qscs] sign failed, sending unsigned:', e);
+        if (!selfHealUsed) {
+          return selfHeal('sign failed: ' + (e && e.message)).then(function () {
+            return doSigned();
+          }, function (healErr) {
+            console.error('[qscs] self-heal failed, sending unsigned:', healErr);
+            return origFetch(input, init);
+          });
+        }
+        console.warn('[qscs] sign failed and self-heal already used, sending unsigned:', e);
         return origFetch(input, init);
       }
     };
 
     if (!exportsRef) {
-      // Queue until WASM identity is ready.
-      return readyPromise.then(doSigned, function () { return origFetch(input, init); });
+      // Do not hang indefinitely behind init. If bootstrap is wedged on a
+      // device/browser, fail open so the app can render error states instead
+      // of freezing forever.
+      return Promise.race([
+        initPromise.then(function () { return 'ready'; }, function () { return 'failed'; }),
+        new Promise(function (resolve) {
+          setTimeout(function () { resolve('timeout'); }, INIT_FETCH_WAIT_MS);
+        })
+      ]).then(function (state) {
+        if (state === 'ready' && exportsRef) {
+          return attempt();
+        }
+        if (state !== 'ready') {
+          if (requiresIdentity) {
+            console.warn('[qscs] init not ready for identity request, refusing unsigned fallback:', state, url);
+            throw new Error('qscs_identity_not_ready');
+          }
+          console.warn('[qscs] init not ready for request, sending unsigned:', state, url);
+        }
+        return origFetch(input, init);
+      });
     }
-    return doSigned();
+    return attempt();
   }
 
   /* ── Init ───────────────────────────────────────── */
 
-  var readyPromise = Promise.all([loadWasm(), loadOrCreateWrapKey()])
+  // Manual reset hatch: visiting any spooksystems.net URL with
+  // `?qscs-reset=1` wipes the IndexedDB identity and reloads.  Lets a
+  // user on a phone (no dev tools) recover from a wedged identity
+  // without having to clear site data through Safari settings.
+  var resetRequested = false;
+  try {
+    var sp = new URLSearchParams(window.location.search);
+    resetRequested = sp.get('qscs-reset') === '1';
+  } catch (e) {}
+
+  var preInit = resetRequested
+    ? wipeIdentity().then(function () {
+        // Strip the query param and reload so the freshly generated
+        // identity is in place before any app code runs.
+        var u = new URL(window.location.href);
+        u.searchParams.delete('qscs-reset');
+        window.location.replace(u.toString());
+        // Return a never-resolving promise — page is navigating away.
+        return new Promise(function () {});
+      })
+    : Promise.resolve();
+
+  var initPromise = preInit
+    .then(function () {
+      return Promise.all([loadWasm(), loadOrCreateWrapKey()]);
+    })
     .then(function (results) {
       exportsRef = results[0];
       var wrapKey = results[1];
-      return bootstrapIdentity(exportsRef, wrapKey).then(function () {
-        refreshCache();
-      });
+      bootstrapIdentity(exportsRef, wrapKey)
+        .then(function () {
+          refreshCache();
+          if (!identityReady()) {
+            // Leave recovery to the lazy self-heal path so app startup can
+            // continue even if the first bootstrap left us with no UUID.
+            console.warn('[qscs] bootstrap completed without a usable uuid');
+          }
+        })
+        .catch(function (e) {
+          console.warn('[qscs] identity bootstrap will recover lazily:', e);
+        });
+      return null;
     })
     .catch(function (e) {
       console.error('[qscs] init failed:', e);
       throw e;
     });
+
+  // Application code awaits qscsCrypto.ready before reading uuid/pubkey. Never
+  // let that await block forever on a browser-specific IDB/WASM stall.
+  var readyPromise = Promise.race([
+    initPromise.then(function () { return null; }, function () { return null; }),
+    new Promise(function (resolve) {
+      setTimeout(function () {
+        console.warn('[qscs] ready timeout, continuing without blocking UI');
+        resolve(null);
+      }, READY_PROMISE_TIMEOUT_MS);
+    })
+  ]);
 
   // Install the monkey-patch immediately so requests issued before WASM
   // is ready are queued (signedFetch awaits readyPromise when exportsRef
@@ -351,6 +528,14 @@
     ready: readyPromise,
     clientUuidHex: function () { return clientUuidHexCached; },
     pubkeyHex:     function () { return pubkeyHexCached; },
-    signedFetch:   signedFetch
+    signedFetch:   signedFetch,
+    // Manual self-heal from the JS console: `qscsCrypto.reset()` wipes
+    // IndexedDB and reloads the page.  Also available via URL param
+    // `?qscs-reset=1` for users without dev tools.
+    reset: function () {
+      return wipeIdentity().then(function () {
+        window.location.reload();
+      });
+    }
   };
 })();
