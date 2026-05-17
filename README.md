@@ -173,7 +173,7 @@ together; treat them as a pair when you upgrade.
 
 | version  | notes                                                |
 |----------|------------------------------------------------------|
-| 20260513c | current production build                            |
+| 3b6f0ad | current production build                            |
 
 ## Licence
 
