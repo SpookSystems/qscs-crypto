@@ -171,6 +171,11 @@
     return WebAssembly.instantiateStreaming(fetch(WASM_URL), imports)
       .then(function (r) {
         memoryRef.exports = r.instance.exports;
+        // The binary ships with only 2 initial pages (128KB), almost
+        // entirely consumed by data + stack — leaving barely any heap.
+        // Grow by 8 pages (512KB) so the bump allocator has ~500KB of
+        // free space, enough for ~1,000+ signRequest calls per session.
+        try { memoryRef.exports.memory.grow(8); } catch (e) {}
         return memoryRef.exports;
       });
   }

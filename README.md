@@ -173,7 +173,8 @@ together; treat them as a pair when you upgrade.
 
 | version  | md5 (dist/qscs-crypto.js)          | notes                                                              |
 |----------|------------------------------------|--------------------------------------------------------------------|
-| fd300ae  | `b552168ab3f805ef5ff2c07018a530b8` | current — fix WASM allocator exhaustion; selfHeal reloads WASM     |
+| 10194d0  | `314bd10d5fc426bb4228e5359d39c06f` | current — grow WASM memory by 8 pages after load (fixes OOM on 2-page binary) |
+| fd300ae  | `b552168ab3f805ef5ff2c07018a530b8` | fix WASM allocator exhaustion; selfHeal reloads WASM               |
 | 3b6f0ad  | —                                  | previous production build                                          |
 
 ## Licence
