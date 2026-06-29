@@ -171,9 +171,10 @@ four headers.
 The on-the-wire format is stable. The script and WASM blob are versioned
 together; treat them as a pair when you upgrade.
 
-| version  | notes                                                |
-|----------|------------------------------------------------------|
-| 3b6f0ad | current production build                            |
+| version  | md5 (dist/qscs-crypto.js)          | notes                                                              |
+|----------|------------------------------------|--------------------------------------------------------------------|
+| fd300ae  | `b552168ab3f805ef5ff2c07018a530b8` | current — fix WASM allocator exhaustion; selfHeal reloads WASM     |
+| 3b6f0ad  | —                                  | previous production build                                          |
 
 ## Licence
 
