@@ -278,8 +278,14 @@
 
     // Allocate scratch buffers in WASM linear memory for inputs + outputs.
     var totalIn = methodU8.length + hostU8.length + uriU8.length + bodyU8.length;
-    var basePtr = exportsRef.qscs_alloc(totalIn + 33 + 89);
+    var allocSize = totalIn + 33 + 89;
+    var basePtr = exportsRef.qscs_alloc(allocSize);
     var mU8 = new Uint8Array(exportsRef.memory.buffer);
+    // Guard against allocator exhaustion (bump allocator never frees;
+    // fails with 0 or a sentinel past memory end after many calls).
+    if (!basePtr || (basePtr + allocSize) > mU8.byteLength) {
+      throw new Error('qscs_alloc: OOM (ptr=' + basePtr + ', need=' + allocSize + ', mem=' + mU8.byteLength + ')');
+    }
 
     var mPtr = basePtr;
     var hPtr = mPtr + methodU8.length;
@@ -338,18 +344,20 @@
     }
     selfHealUsed = true;
     console.warn('[qscs] self-healing identity:', reason);
-    selfHealPromise = wipeIdentity().then(function () {
-      // Re-run wrap-key + identity bootstrap against the (now empty)
-      // store.  exportsRef is already populated from the original init.
-      return loadOrCreateWrapKey().then(function (wrapKey) {
-        return bootstrapIdentity(exportsRef, wrapKey).then(function () {
-          refreshCache();
-          if (!identityReady()) {
-            throw new Error('self-heal did not produce a usable identity');
-          }
-        });
+    // Reload the WASM module so we get a fresh linear-memory allocator.
+    // The existing identity blob stays in IndexedDB — no wipeIdentity().
+    // bootstrapIdentity will re-load it; if it fails it regenerates.
+    selfHealPromise = Promise.all([loadWasm(), loadOrCreateWrapKey()])
+      .then(function (results) {
+        exportsRef = results[0];
+        return bootstrapIdentity(exportsRef, results[1]);
+      })
+      .then(function () {
+        refreshCache();
+        if (!identityReady()) {
+          throw new Error('self-heal did not produce a usable identity');
+        }
       });
-    });
     return selfHealPromise;
   }
 
