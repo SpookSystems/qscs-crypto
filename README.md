@@ -72,10 +72,28 @@ exposes a small public API on `window.qscsCrypto`.
                           METHOD\nPATH\nTS\nNONCE\nSHA-256(body)
    ```
 
-5. Cross-origin requests bypass signing untouched, except for an explicit
-   allow-list of QSCS federation recipients. The default build permits only
-   `https://monitoring.spooksystems.org`; those requests are signed using the
-   recipient host and always omit recipient cookies.
+5. Cross-origin requests bypass signing untouched, unless the integrator
+   explicitly allows a QSCS federation recipient. Allowed requests are signed
+   using the recipient host and always omit recipient cookies.
+
+### Federated identity requests
+
+The SDK does not federate identity by default. To allow a receiving QSCS
+origin, declare its exact HTTPS origin before loading the SDK:
+
+```html
+<script>
+  window.QSCS_FEDERATED_IDENTITY_ORIGINS = [
+    'https://monitoring.example.com'
+  ];
+</script>
+<script src="/js/qscs-crypto.js"></script>
+```
+
+Only exact, valid HTTPS origins are accepted; malformed entries are ignored.
+The recipient must be configured to accept the QSCS signature headers and its
+CORS policy must permit the calling site. Never add an origin you do not
+control: this setting authorizes the SDK to send signed identity headers there.
 
 ## Bootstrap order and the "ready" promise
 
@@ -176,7 +194,7 @@ together; treat them as a pair when you upgrade.
 
 | version  | md5 (dist/qscs-crypto.js)          | notes                                                              |
 |----------|------------------------------------|--------------------------------------------------------------------|
-| unreleased | — | current — federated SpookVis signing is restricted to `monitoring.spooksystems.org`, omits monitoring cookies, and awaits IndexedDB identity readiness before the first signed request |
+| unreleased | — | current — opt-in, exact-origin federated identity signing; recipient cookies are omitted and IndexedDB identity readiness is awaited before the first signed request |
 | 10194d0  | `314bd10d5fc426bb4228e5359d39c06f` | grow WASM memory by 8 pages after load (fixes OOM on 2-page binary) |
 | fd300ae  | `b552168ab3f805ef5ff2c07018a530b8` | fix WASM allocator exhaustion; selfHeal reloads WASM               |
 | 3b6f0ad  | —                                  | previous production build                                          |

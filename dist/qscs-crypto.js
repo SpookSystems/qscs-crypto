@@ -31,13 +31,27 @@
   var WASM_URL = '/wasm/qscs-substrate.wasm';
   var READY_PROMISE_TIMEOUT_MS = 2500;
   var INIT_FETCH_WAIT_MS = 4000;
-  // A federated request is still signed by this origin's local key, but its
-  // canonical Host must be the receiving origin. Keep this allow-list exact:
-  // cross-origin requests to arbitrary third parties must never gain identity
-  // headers or a reusable signature.
-  var FEDERATED_IDENTITY_ORIGINS = Object.freeze([
-    'https://monitoring.spooksystems.org'
-  ]);
+  // Federated requests are opt-in. Configure exact HTTPS origins before this
+  // script loads, for example:
+  // window.QSCS_FEDERATED_IDENTITY_ORIGINS = ['https://monitor.example.com'];
+  // Invalid values are ignored so a broad or malformed setting can never
+  // cause credentials to be sent to an arbitrary cross-origin destination.
+  function configuredFederatedOrigins() {
+    var configured;
+    try { configured = window.QSCS_FEDERATED_IDENTITY_ORIGINS; } catch (e) {}
+    if (!Array.isArray(configured)) return [];
+    var origins = [];
+    for (var i = 0; i < configured.length; i++) {
+      if (typeof configured[i] !== 'string') continue;
+      try {
+        var parsed = new URL(configured[i]);
+        if (parsed.protocol !== 'https:') continue;
+        if (origins.indexOf(parsed.origin) === -1) origins.push(parsed.origin);
+      } catch (e) {}
+    }
+    return Object.freeze(origins);
+  }
+  var FEDERATED_IDENTITY_ORIGINS = configuredFederatedOrigins();
 
   // Origin host for the canonical message.  Must match what the server
   // sees in the Host header (no port for default 80/443).
