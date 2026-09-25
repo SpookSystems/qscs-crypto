@@ -31,6 +31,13 @@
   var WASM_URL = '/wasm/qscs-substrate.wasm';
   var READY_PROMISE_TIMEOUT_MS = 2500;
   var INIT_FETCH_WAIT_MS = 4000;
+  // A federated request is still signed by this origin's local key, but its
+  // canonical Host must be the receiving origin. Keep this allow-list exact:
+  // cross-origin requests to arbitrary third parties must never gain identity
+  // headers or a reusable signature.
+  var FEDERATED_IDENTITY_ORIGINS = Object.freeze([
+    'https://monitoring.spooksystems.org'
+  ]);
 
   // Origin host for the canonical message.  Must match what the server
   // sees in the Host header (no port for default 80/443).
@@ -269,11 +276,11 @@
     return '';
   }
 
-  function signRequest(method, uri, body) {
+  function signRequest(method, uri, body, hostOverride) {
     if (!identityReady()) {
       throw new Error('qscs identity not ready (empty client uuid)');
     }
-    var host = canonicalHost();
+    var host = hostOverride || canonicalHost();
     var bodyStr = bodyToString(body);
 
     var methodU8 = encoder.encode(method);
@@ -379,16 +386,22 @@
       body = init.body;
     }
 
-    // Only sign same-origin requests.  Cross-origin requests (e.g. CDN)
-    // bypass the gate.
+    // Same-origin requests are signed as usual. A tightly allow-listed
+    // recipient may receive a federated request signed over *its* Host;
+    // every other cross-origin request (CDN, analytics, third parties) is
+    // deliberately left untouched.
     var sameOrigin = true;
+    var federatedOrigin = false;
+    var targetHost = canonicalHost();
     try {
       var parsed = new URL(url, window.location.href);
       sameOrigin = (parsed.origin === window.location.origin);
+      federatedOrigin = !sameOrigin && FEDERATED_IDENTITY_ORIGINS.indexOf(parsed.origin) !== -1;
+      targetHost = parsed.host;
       url = parsed.pathname + parsed.search;
     } catch (e) {}
 
-    if (!sameOrigin) {
+    if (!sameOrigin && !federatedOrigin) {
       return origFetch(input, init);
     }
 
@@ -407,6 +420,7 @@
     }
 
     var requiresIdentity =
+      federatedOrigin ||
       url.startsWith('/api/') ||
       url === '/auth/login' ||
       url.startsWith('/auth/login?') ||
@@ -414,10 +428,13 @@
       url.startsWith('/auth/logout?');
 
     var doSigned = function () {
-      var headers = signRequest(method, url, body);
+      var headers = signRequest(method, url, body, targetHost);
       var mergedHeaders = new Headers(init.headers || (typeof input !== 'string' ? input.headers : undefined) || {});
       Object.keys(headers).forEach(function (k) { mergedHeaders.set(k, headers[k]); });
       var newInit = Object.assign({}, init, { headers: mergedHeaders });
+      // Federated identity is header/signature based. Do not send or depend on
+      // cookies belonging to the monitoring origin.
+      if (federatedOrigin) newInit.credentials = 'omit';
       return origFetch(input, newInit);
     };
 
@@ -444,7 +461,7 @@
       }
     };
 
-    if (!exportsRef) {
+    if (!exportsRef || !identityReady()) {
       // Do not hang indefinitely behind init. If bootstrap is wedged on a
       // device/browser, fail open so the app can render error states instead
       // of freezing forever.
@@ -501,7 +518,11 @@
     .then(function (results) {
       exportsRef = results[0];
       var wrapKey = results[1];
-      bootstrapIdentity(exportsRef, wrapKey)
+      // The first SpookVis requests are federated and identity-gated. Keep
+      // initPromise pending until the persistent identity has loaded and the
+      // UUID cache is populated, otherwise those initial requests race the
+      // bootstrap and are rejected as unsigned.
+      return bootstrapIdentity(exportsRef, wrapKey)
         .then(function () {
           refreshCache();
           if (!identityReady()) {
@@ -509,11 +530,7 @@
             // continue even if the first bootstrap left us with no UUID.
             console.warn('[qscs] bootstrap completed without a usable uuid');
           }
-        })
-        .catch(function (e) {
-          console.warn('[qscs] identity bootstrap will recover lazily:', e);
         });
-      return null;
     })
     .catch(function (e) {
       console.error('[qscs] init failed:', e);

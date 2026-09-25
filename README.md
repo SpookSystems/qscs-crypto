@@ -72,7 +72,10 @@ exposes a small public API on `window.qscsCrypto`.
                           METHOD\nPATH\nTS\nNONCE\nSHA-256(body)
    ```
 
-5. Cross-origin requests bypass signing untouched.
+5. Cross-origin requests bypass signing untouched, except for an explicit
+   allow-list of QSCS federation recipients. The default build permits only
+   `https://monitoring.spooksystems.org`; those requests are signed using the
+   recipient host and always omit recipient cookies.
 
 ## Bootstrap order and the "ready" promise
 
@@ -173,7 +176,8 @@ together; treat them as a pair when you upgrade.
 
 | version  | md5 (dist/qscs-crypto.js)          | notes                                                              |
 |----------|------------------------------------|--------------------------------------------------------------------|
-| 10194d0  | `314bd10d5fc426bb4228e5359d39c06f` | current — grow WASM memory by 8 pages after load (fixes OOM on 2-page binary) |
+| unreleased | — | current — federated SpookVis signing is restricted to `monitoring.spooksystems.org`, omits monitoring cookies, and awaits IndexedDB identity readiness before the first signed request |
+| 10194d0  | `314bd10d5fc426bb4228e5359d39c06f` | grow WASM memory by 8 pages after load (fixes OOM on 2-page binary) |
 | fd300ae  | `b552168ab3f805ef5ff2c07018a530b8` | fix WASM allocator exhaustion; selfHeal reloads WASM               |
 | 3b6f0ad  | —                                  | previous production build                                          |
 
