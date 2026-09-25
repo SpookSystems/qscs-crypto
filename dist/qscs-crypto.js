@@ -466,9 +466,17 @@
           return selfHeal('sign failed: ' + (e && e.message)).then(function () {
             return doSigned();
           }, function (healErr) {
+            if (requiresIdentity) {
+              console.error('[qscs] self-heal failed; refusing unsigned identity request:', healErr);
+              throw healErr;
+            }
             console.error('[qscs] self-heal failed, sending unsigned:', healErr);
             return origFetch(input, init);
           });
+        }
+        if (requiresIdentity) {
+          console.warn('[qscs] sign failed and self-heal already used; refusing unsigned identity request:', e);
+          throw e;
         }
         console.warn('[qscs] sign failed and self-heal already used, sending unsigned:', e);
         return origFetch(input, init);
