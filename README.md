@@ -129,6 +129,12 @@ permissions for every protected operation.
 Await `ready` first if you need the persisted identity's status. Login and logout
 can return HTTP 200 with `ok:false`; check the JSON result.
 
+## JSON API delta transport
+
+The [API delta example](examples/README.md#signed-json-api-deltas) adds explicit
+JSON reconstruction around the signer for allowlisted GET routes, including
+federated APIs. Identity signing alone does not negotiate response deltas.
+
 ## Signed request format
 
 Sign the exact concatenation below, without a trailing newline:
