@@ -6,8 +6,8 @@ same-origin `fetch()` requests with Ed25519.
 
 ## Install
 
-Use both files from one [release](https://github.com/SpookSystems/qscs-crypto/releases/latest),
-or from the same repository checkout:
+Use both files from the same repository checkout or the
+[v20261020 source archive](https://github.com/SpookSystems/qscs-crypto/archive/refs/tags/v20261020.zip):
 
 ```
 dist/qscs-crypto.js
