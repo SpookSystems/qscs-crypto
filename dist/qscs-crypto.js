@@ -1,6 +1,6 @@
 /*
  * qscs-crypto.js — browser-side WASM identity bootstrap and signed-fetch
- * wrapper for spooksystems.net.
+ * wrapper for applications behind the QSCS identity gate.
  *
  * Responsibilities:
  *   1. Load /wasm/qscs-substrate.wasm.
@@ -16,8 +16,8 @@
  *          X-QSCS-Nonce       : 32 hex
  *          X-QSCS-Sig         : base64 of 64-byte signature
  *
- * Privkey bytes never cross the JS/WASM boundary in plaintext: the JS
- * harness only ever sees the encrypted blob + sig output.
+ * Identity blobs are wrapped with WebCrypto before IndexedDB storage. The JS
+ * harness handles the unwrapped blob transiently; this is not an XSS sandbox.
  */
 (function () {
   'use strict';
@@ -28,8 +28,11 @@
   var STORE = 'kv';
   var WRAP_ALG = { name: 'AES-GCM', length: 256 };
   var WRAP_IV_BYTES = 12;
-  var WASM_URL = '/wasm/qscs-substrate.wasm';
-  var READY_PROMISE_TIMEOUT_MS = 2500;
+  var WASM_URL = window.QSCS_WASM_URL || '/wasm/qscs-substrate.wasm';
+  var wasmLocation = new URL(WASM_URL, window.location.href);
+  if (wasmLocation.origin !== window.location.origin) throw new Error('QSCS_WASM_URL must be same-origin');
+  WASM_URL = wasmLocation.href;
+  var READY_PROMISE_TIMEOUT_MS = 10000;
   var INIT_FETCH_WAIT_MS = 4000;
   // Federated requests are opt-in. Configure exact HTTPS origins before this
   // script loads, for example:
@@ -45,7 +48,8 @@
       if (typeof configured[i] !== 'string') continue;
       try {
         var parsed = new URL(configured[i]);
-        if (parsed.protocol !== 'https:') continue;
+        if (parsed.protocol !== 'https:' || parsed.username || parsed.password ||
+            parsed.pathname !== '/' || parsed.search || parsed.hash) continue;
         if (origins.indexOf(parsed.origin) === -1) origins.push(parsed.origin);
       } catch (e) {}
     }
@@ -54,9 +58,9 @@
   var FEDERATED_IDENTITY_ORIGINS = configuredFederatedOrigins();
 
   // Origin host for the canonical message.  Must match what the server
-  // sees in the Host header (no port for default 80/443).
+  // uses from the Host header, with the port removed.
   function canonicalHost() {
-    return window.location.host;
+    return new URL(window.location.href).hostname;
   }
 
   /* ── IndexedDB helpers ──────────────────────────── */
@@ -189,7 +193,7 @@
       }
     };
 
-    return WebAssembly.instantiateStreaming(fetch(WASM_URL), imports)
+    return WebAssembly.instantiateStreaming(origFetch(WASM_URL), imports)
       .then(function (r) {
         memoryRef.exports = r.instance.exports;
         // The binary ships with only 2 initial pages (128KB), almost
@@ -279,15 +283,13 @@
     return !!clientUuidHexCached && clientUuidHexCached.length === 32;
   }
 
-  function bodyToString(body) {
-    if (body == null) return '';
-    if (typeof body === 'string') return body;
-    if (body instanceof URLSearchParams) return body.toString();
-    if (body instanceof Uint8Array) return new TextDecoder().decode(body);
-    if (body instanceof ArrayBuffer) return new TextDecoder().decode(new Uint8Array(body));
-    // Blob / FormData / ReadableStream are not supported by this gate;
-    // sign over empty body and rely on the server canonicalising likewise.
-    return '';
+  function bodyToBytes(body) {
+    if (body == null) return new Uint8Array(0);
+    if (typeof body === 'string') return encoder.encode(body);
+    if (body instanceof URLSearchParams) return encoder.encode(body.toString());
+    if (body instanceof ArrayBuffer) return new Uint8Array(body);
+    if (ArrayBuffer.isView(body)) return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+    throw new TypeError('Unsupported signed body; use JSON/text, URLSearchParams or bytes');
   }
 
   function signRequest(method, uri, body, hostOverride) {
@@ -295,12 +297,12 @@
       throw new Error('qscs identity not ready (empty client uuid)');
     }
     var host = hostOverride || canonicalHost();
-    var bodyStr = bodyToString(body);
+    var bodyBytes = bodyToBytes(body);
 
     var methodU8 = encoder.encode(method);
     var hostU8   = encoder.encode(host);
     var uriU8    = encoder.encode(uri);
-    var bodyU8   = encoder.encode(bodyStr);
+    var bodyU8   = bodyBytes;
 
     // Allocate scratch buffers in WASM linear memory for inputs + outputs.
     var totalIn = methodU8.length + hostU8.length + uriU8.length + bodyU8.length;
@@ -362,6 +364,27 @@
   // could cause an infinite re-init loop on every fetch.
   var selfHealUsed = false;
   var selfHealPromise = null;
+  var rotationPromise = null;
+
+  // Auth transitions get a new UUID/keypair. Never reuse a revoked UUID while
+  // peer replication and federated binding caches still contain its history.
+  // Commit encrypted storage before switching the live signer; failure keeps
+  // the old identity available for a retry of server-side logout.
+  function rotateIdentity() {
+    if (rotationPromise) return rotationPromise;
+    rotationPromise = initPromise.then(function () { return selfHealPromise; })
+      .then(function () { return Promise.all([loadWasm(), loadOrCreateWrapKey()]); })
+      .then(function (results) {
+        return generateAndPersist(results[0], results[1]).then(function () {
+          exportsRef = results[0];
+          refreshCache();
+          selfHealUsed = false;
+          selfHealPromise = null;
+          if (!identityReady()) throw new Error('identity rotation failed');
+        });
+      }).finally(function () { rotationPromise = null; });
+    return rotationPromise;
+  }
 
   function selfHeal(reason) {
     if (selfHealPromise) return selfHealPromise;
@@ -388,15 +411,17 @@
   }
 
   function signedFetch(input, init) {
+    if (rotationPromise) return rotationPromise.then(function () { return signedFetch(input, init); });
     init = init || {};
     var url, method, body;
+    if (input instanceof URL) input = input.href;
     if (typeof input === 'string') {
       url = input;
       method = (init.method || 'GET').toUpperCase();
       body = init.body;
     } else {
       url = input.url;
-      method = (input.method || 'GET').toUpperCase();
+      method = (init.method || input.method || 'GET').toUpperCase();
       body = init.body;
     }
 
@@ -411,7 +436,7 @@
       var parsed = new URL(url, window.location.href);
       sameOrigin = (parsed.origin === window.location.origin);
       federatedOrigin = !sameOrigin && FEDERATED_IDENTITY_ORIGINS.indexOf(parsed.origin) !== -1;
-      targetHost = parsed.host;
+      targetHost = parsed.hostname;
       url = parsed.pathname + parsed.search;
     } catch (e) {}
 
@@ -421,25 +446,25 @@
 
     // Never route substrate bootstrap through signedFetch; that can
     // deadlock init if window.fetch is already monkey-patched.
-    if (url === WASM_URL || url.startsWith(WASM_URL + '?')) {
+    if (parsed && parsed.origin === wasmLocation.origin && parsed.pathname === wasmLocation.pathname) {
       return origFetch(input, init);
     }
 
     // /auth/status must never block on crypto bootstrap, but it does need
     // X-QSCS-Client-Uuid so the backend can resolve the current identity.
-    if (url === '/auth/status' || url.startsWith('/auth/status?')) {
+    if (sameOrigin && (url === '/auth/status' || url.startsWith('/auth/status?'))) {
       var statusHeaders = new Headers(init.headers || (typeof input !== 'string' ? input.headers : undefined) || {});
       if (clientUuidHexCached) statusHeaders.set('X-QSCS-Client-Uuid', clientUuidHexCached);
       return origFetch(input, Object.assign({}, init, { headers: statusHeaders }));
     }
 
-    var requiresIdentity =
-      federatedOrigin ||
-      url.startsWith('/api/') ||
-      url === '/auth/login' ||
-      url.startsWith('/auth/login?') ||
-      url === '/auth/logout' ||
-      url.startsWith('/auth/logout?');
+    // Reconstruct Request bodies before signing; sign exactly the transmitted bytes.
+    if (typeof input !== 'string' && init.body === undefined && !['GET','HEAD'].includes(method)) {
+      return input.clone().arrayBuffer().then(function (bytes) {
+        return signedFetch(input, Object.assign({}, init, {body: new Uint8Array(bytes)}));
+      });
+    }
+    try { bodyToBytes(body); } catch (error) { return Promise.reject(error); }
 
     var doSigned = function () {
       var headers = signRequest(method, url, body, targetHost);
@@ -447,45 +472,24 @@
       Object.keys(headers).forEach(function (k) { mergedHeaders.set(k, headers[k]); });
       var newInit = Object.assign({}, init, { headers: mergedHeaders });
       // Federated identity is header/signature based. Do not send or depend on
-      // cookies belonging to the monitoring origin.
+      // cookies belonging to the receiving origin.
       if (federatedOrigin) newInit.credentials = 'omit';
       return origFetch(input, newInit);
     };
 
-    // Attempt signing; if identity is missing (e.g. init failed silently
-    // on this device — observed on iOS Safari after IndexedDB partition
-    // eviction), self-heal once and retry before falling back to an
-    // unsigned request.  Falling back to unsigned would produce a 401
-    // "not authenticated" from the gate and the SPA would render free-
-    // tier defaults, which is the bug we are fixing.
+    // Reinitialise the signer once if its scratch memory is exhausted.
+    // A signed request is never retried as an unsigned request.
     var attempt = function () {
-      try {
-        return doSigned();
-      } catch (e) {
-        if (!selfHealUsed) {
-          return selfHeal('sign failed: ' + (e && e.message)).then(function () {
-            return doSigned();
-          }, function (healErr) {
-            if (requiresIdentity) {
-              console.error('[qscs] self-heal failed; refusing unsigned identity request:', healErr);
-              throw healErr;
-            }
-            console.error('[qscs] self-heal failed, sending unsigned:', healErr);
-            return origFetch(input, init);
-          });
-        }
-        if (requiresIdentity) {
-          console.warn('[qscs] sign failed and self-heal already used; refusing unsigned identity request:', e);
-          throw e;
-        }
-        console.warn('[qscs] sign failed and self-heal already used, sending unsigned:', e);
-        return origFetch(input, init);
+      try { return doSigned(); }
+      catch (error) {
+        if (selfHealUsed) return Promise.reject(error);
+        return selfHeal('sign failed: ' + (error && error.message)).then(doSigned);
       }
     };
 
     if (!exportsRef || !identityReady()) {
       // Do not hang indefinitely behind init. If bootstrap is wedged on a
-      // device/browser, fail open so the app can render error states instead
+      // device/browser, reject so the app can render error states instead
       // of freezing forever.
       return Promise.race([
         initPromise.then(function () { return 'ready'; }, function () { return 'failed'; }),
@@ -493,17 +497,8 @@
           setTimeout(function () { resolve('timeout'); }, INIT_FETCH_WAIT_MS);
         })
       ]).then(function (state) {
-        if (state === 'ready' && exportsRef) {
-          return attempt();
-        }
-        if (state !== 'ready') {
-          if (requiresIdentity) {
-            console.warn('[qscs] init not ready for identity request, refusing unsigned fallback:', state, url);
-            throw new Error('qscs_identity_not_ready');
-          }
-          console.warn('[qscs] init not ready for request, sending unsigned:', state, url);
-        }
-        return origFetch(input, init);
+        if (state === 'ready' && exportsRef && identityReady()) return attempt();
+        throw new Error('qscs_identity_not_ready');
       });
     }
     return attempt();
@@ -511,7 +506,7 @@
 
   /* ── Init ───────────────────────────────────────── */
 
-  // Manual reset hatch: visiting any spooksystems.net URL with
+  // Manual reset hatch: visiting any application URL with
   // `?qscs-reset=1` wipes the IndexedDB identity and reloads.  Lets a
   // user on a phone (no dev tools) recover from a wedged identity
   // without having to clear site data through Safari settings.
@@ -540,10 +535,7 @@
     .then(function (results) {
       exportsRef = results[0];
       var wrapKey = results[1];
-      // The first SpookVis requests are federated and identity-gated. Keep
-      // initPromise pending until the persistent identity has loaded and the
-      // UUID cache is populated, otherwise those initial requests race the
-      // bootstrap and are rejected as unsigned.
+      // Resolve initialization only after persistence and identity loading finish.
       return bootstrapIdentity(exportsRef, wrapKey)
         .then(function () {
           refreshCache();
@@ -561,15 +553,16 @@
 
   // Application code awaits qscsCrypto.ready before reading uuid/pubkey. Never
   // let that await block forever on a browser-specific IDB/WASM stall.
-  var readyPromise = Promise.race([
-    initPromise.then(function () { return null; }, function () { return null; }),
-    new Promise(function (resolve) {
-      setTimeout(function () {
-        console.warn('[qscs] ready timeout, continuing without blocking UI');
-        resolve(null);
-      }, READY_PROMISE_TIMEOUT_MS);
-    })
-  ]);
+  var readyPromise = new Promise(function (resolve, reject) {
+    var timer = setTimeout(function () { reject(new Error('qscs_identity_ready_timeout')); }, READY_PROMISE_TIMEOUT_MS);
+    initPromise.then(function () {
+      clearTimeout(timer);
+      if (!identityReady()) return reject(new Error('qscs_identity_not_ready'));
+      resolve();
+    }, function (error) { clearTimeout(timer); reject(error); });
+  });
+  // Keep pages without an auth consumer from generating an unhandled rejection.
+  readyPromise.catch(function () {});
 
   // Install the monkey-patch immediately so requests issued before WASM
   // is ready are queued (signedFetch awaits readyPromise when exportsRef
@@ -581,6 +574,7 @@
     clientUuidHex: function () { return clientUuidHexCached; },
     pubkeyHex:     function () { return pubkeyHexCached; },
     signedFetch:   signedFetch,
+    rotateIdentity: rotateIdentity,
     // Manual self-heal from the JS console: `qscsCrypto.reset()` wipes
     // IndexedDB and reloads the page.  Also available via URL param
     // `?qscs-reset=1` for users without dev tools.

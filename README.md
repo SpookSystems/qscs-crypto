@@ -1,203 +1,200 @@
 # qscs-crypto
 
-Browser-side request signer for sites fronted by a QSCS substrate node with
-an `auth=identity` origin. Drop these two files onto your web root, include
-the script tag before your application JS, and every same-origin `fetch()`
-your app makes will be signed transparently with an ed25519 keypair held in
-the user's IndexedDB.
-
-This is the same client shim used in production by `spook.systems` and
-`spooksystems.net`.
-
-## Contents
-
-```
-dist/
-  qscs-crypto.js       ~12 KB, plain ES5, no build step needed
-```
-
-The matching `qscs-substrate.wasm` binary (~16 KB) ships **as a release
-asset** on each tagged release rather than inside the repo, so the git
-history stays binary-free. Grab it from:
-
-https://github.com/SpookSystems/qscs-crypto/releases/latest
-
-(or pin to a specific tag, e.g.
-`https://github.com/SpookSystems/qscs-crypto/releases/download/v20260513c/qscs-substrate.wasm`).
-
-The `.js` and the `.wasm` are versioned together — always download the
-`.wasm` that ships with the same release tag as the `.js` you're using.
+Browser request signing for applications behind the QSCS identity gate. The SDK
+loads its matching WebAssembly module, manages a browser identity and signs
+same-origin `fetch()` requests with Ed25519.
 
 ## Install
 
-Download `dist/qscs-crypto.js` from this repo and `qscs-substrate.wasm`
-from the matching release, then copy them to your web root so they are
-served from:
+Use both files from one [release](https://github.com/SpookSystems/qscs-crypto/releases/latest),
+or from the same repository checkout:
 
 ```
-https://<your-host>/js/qscs-crypto.js
-https://<your-host>/wasm/qscs-substrate.wasm
+dist/qscs-crypto.js
+dist/qscs-substrate.wasm
+dist/SHA256SUMS
 ```
 
-The script defaults `WASM_URL` to `/wasm/qscs-substrate.wasm`. To host the
-WASM at a different path, set `window.QSCS_WASM_URL` **before** the
-`qscs-crypto.js` script tag:
+Host the JavaScript at `/static/qscs-crypto.js` and the WASM at
+`/wasm/qscs-substrate.wasm`. Serve the WASM as `application/wasm` over HTTPS.
+`qscs-crypto.js` is also the loader: no `qscs-substrate.js` is required.
 
 ```html
-<script>window.QSCS_WASM_URL = '/assets/qscs/qscs-substrate.wasm';</script>
-<script src="/js/qscs-crypto.js?v=YOUR-CACHE-BUSTER"></script>
-<script src="/js/your-app.js?v=…"></script>
+<script src="/static/qscs-crypto.js" defer></script>
+<script src="/static/app.js" defer></script>
 ```
 
-That's it. `qscs-crypto.js` installs a monkey-patched `window.fetch` and
-exposes a small public API on `window.qscsCrypto`.
+For another WASM location, define `window.QSCS_WASM_URL` in a configuration script
+loaded before the SDK. It must be a same-origin URL. Deploy matching files
+atomically and use versioned URLs when caching release assets.
 
-## What it does
+## Login, requests and logout
 
-1. On first load, opens an IndexedDB database `qscs-identity` and either
-   loads the existing wrap key (non-extractable AES-GCM, generated via
-   `crypto.subtle.generateKey`) or generates a new one and stores it.
-2. Loads `/wasm/qscs-substrate.wasm` via `WebAssembly.instantiateStreaming`.
-3. Either decrypts the existing wrapped ed25519 keypair blob out of
-   IndexedDB and loads it into the WASM module, or asks the module to
-   generate a new keypair and persists the encrypted blob.
-4. Replaces `window.fetch` with `signedFetch`, which for every same-origin
-   request appends four signing headers:
-
-   ```
-   X-QSCS-Client-Uuid   16-byte hex client UUID (= hash of pubkey)
-   X-QSCS-Ts            unix-ms timestamp
-   X-QSCS-Nonce         16-byte hex random nonce
-   X-QSCS-Sig           base64 ed25519 signature over
-                          METHOD\nPATH\nTS\nNONCE\nSHA-256(body)
-   ```
-
-5. Cross-origin requests bypass signing untouched, unless the integrator
-   explicitly allows a QSCS federation recipient. Allowed requests are signed
-   using the recipient host and always omit recipient cookies.
-
-### Federated identity requests
-
-The SDK does not federate identity by default. To allow a receiving QSCS
-origin, declare its exact HTTPS origin before loading the SDK:
-
-```html
-<script>
-  window.QSCS_FEDERATED_IDENTITY_ORIGINS = [
-    'https://monitoring.example.com'
-  ];
-</script>
-<script src="/js/qscs-crypto.js"></script>
-```
-
-Only exact, valid HTTPS origins are accepted; malformed entries are ignored.
-The recipient must be configured to accept the QSCS signature headers and its
-CORS policy must permit the calling site. Never add an origin you do not
-control: this setting authorizes the SDK to send signed identity headers there.
-
-## Bootstrap order and the "ready" promise
-
-The WASM compile + IndexedDB open is asynchronous. Any `fetch()` called
-before the bootstrap finishes is queued behind a `readyPromise` and signed
-once the module is up. **However**, if your application code reads
-`window.qscsCrypto.clientUuidHex()` or `pubkeyHex()` directly (for example
-to put them in a JSON body), those return `null` until ready. Always await
-`qscsCrypto.ready` before reading the cached identity values:
+Await `qscsCrypto.ready` before reading the UUID or public key. Both are `null`
+until initialization completes. The promise rejects if the browser cannot load
+or persist its identity; show a retry action rather than continuing unsigned.
 
 ```js
-var ready = (window.qscsCrypto && window.qscsCrypto.ready) || Promise.resolve();
-ready.then(function () {
-  return fetch('/auth/login', {
+async function login(username, password) {
+  await qscsCrypto.ready;
+  await qscsCrypto.rotateIdentity();
+  const response = await qscsCrypto.signedFetch('/auth/login', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
-      username: u,
-      password: p,
-      client_uuid: window.qscsCrypto.clientUuidHex(),
-      pubkey:      window.qscsCrypto.pubkeyHex()
+      username, password,
+      client_uuid: qscsCrypto.clientUuidHex(),
+      pubkey: qscsCrypto.pubkeyHex()
     })
   });
-});
+  const result = await response.json();
+  if (!response.ok || result.ok !== true) throw new Error('Sign-in was not accepted');
+  return result;
+}
+
+async function logout() {
+  await qscsCrypto.ready;
+  const response = await qscsCrypto.signedFetch('/auth/logout', {method: 'POST', body: ''});
+  const result = await response.json();
+  if (!response.ok || result.ok !== true) throw new Error('Sign-out was not confirmed');
+  await qscsCrypto.rotateIdentity();
+}
+
+// After successful login:
+const response = await fetch('/api/account');
+if (!response.ok) throw new Error('Account request failed');
+const account = await response.json();
 ```
 
-Mobile devices (slow WASM streaming compile, IndexedDB transaction latency)
-will lose this race more often than desktops. We learned that the hard way.
+Pause protected requests during login/logout and prevent concurrent auth actions.
+Sign out an existing session before changing accounts. Keep the current identity
+if logout fails so the signed logout can be retried. Rotation creates and persists
+a fresh identity; it does not revoke the previous server binding by itself.
+
+The [browser example](examples/) includes this sequencing. The full
+[integration guide](https://spooksystems.io/documentation/gated-identity/) covers
+origin configuration and application authorization.
+
+## Application configuration
+
+```ini
+[Identity Auth]
+IdentityAuthUrl = https://identity.example.com/qscs/verify
+
+[Origins]
+app.example.com = 127.0.0.1:8081 Auth=identity Proxy=all
+```
+
+QSCS calls the verifier with a JSON object:
+
+```json
+{"uuid":"<32 hex>","origin":"app.example.com","credentials":"alice:password"}
+```
+
+Split `credentials` at the first colon; usernames must not contain colons.
+Validate against your own account store, including account state, and return
+HTTP 200 with a flat JSON object:
+
+```json
+{"authenticated":true,"subject":"account:42"}
+```
+
+`subject` is a stable account identifier, 1–256 characters from
+`A-Z a-z 0-9 . _ - : @`. Return `{"authenticated":false}` for a rejected login.
+Serve the verifier over HTTPS with a trusted certificate, or loopback HTTP when
+it runs on the same machine. Restrict it to your nodes and rate-limit attempts.
+It must be reachable without passing through the identity gate it authenticates.
+Keep account checks and permissions in the application.
+
+QSCS stores the origin-scoped public-key binding in SpookDB and forwards verified
+requests with `X-QSCS-Identity` (browser UUID), `X-QSCS-Authenticated-Subject`
+(account identifier) and `X-QSCS-Identity-Issuer` (authenticating host). The node
+removes incoming copies of these headers. Only trust them on a backend reachable
+through your trusted QSCS path; keep direct public access to that backend closed.
+The application should verify the expected issuer, resolve the subject and check
+permissions for every protected operation.
 
 ## Public API
 
+| API | Meaning |
+| --- | --- |
+| `ready` | Promise resolving after WASM and persisted identity are ready; rejects on failure |
+| `clientUuidHex()` | 32 hex characters, or `null` before readiness |
+| `pubkeyHex()` | 64 hex characters, or `null` before readiness |
+| `signedFetch(input, init)` | Fetch with request signing; also installed as `window.fetch` |
+| `rotateIdentity()` | Persist a new keypair/UUID; queues signing while rotation completes |
+| `reset()` | Clear the local identity and reload; does not revoke a server binding |
+
+`/auth/status` is a same-origin UUID status lookup, not an authorization proof.
+Await `ready` first if you need the persisted identity's status. Login and logout
+can return HTTP 200 with `ok:false`; check the JSON result.
+
+## Signed request format
+
+Sign the exact concatenation below, without a trailing newline:
+
+```
+METHOD + LF + HOST + LF + URI + LF + BODY + LF + TS_MS + LF + NONCE_HEX
+```
+
+- `METHOD`: uppercase HTTP method.
+- `HOST`: destination hostname without its port; preserve the public hostname through your proxy.
+- `URI`: transmitted path and query string, without decoding or rearranging.
+- `BODY`: transmitted raw bytes, empty when absent; do not hash or reserialize them.
+- `TS_MS`: decimal Unix milliseconds.
+- `NONCE_HEX`: 16 fresh random bytes encoded as 32 lowercase hex characters.
+
+Send `X-QSCS-Client-Uuid`, `X-QSCS-Ts`, `X-QSCS-Nonce` and `X-QSCS-Sig`.
+The signature is standard base64 of 64 Ed25519 signature bytes (88 characters
+including padding). The gate checks timestamps within ±60 seconds and rejects
+nonce reuse. Keep node clocks synchronized.
+
+Strings, JSON strings, `URLSearchParams`, `ArrayBuffer`, typed arrays and existing
+`Request` bodies are supported. Convert a `Blob` to bytes before signing.
+Direct `FormData` and streaming bodies are not supported because their final
+wire representation must be known before signing. Preserve any required content
+type when constructing a `Request` or byte body.
+
+## Federated requests
+
+Cross-origin requests are untouched unless explicitly allowed before SDK loading:
+
 ```js
-window.qscsCrypto = {
-  ready:          Promise<void>,            // resolves when WASM + IDB are up
-  clientUuidHex:  () => string | null,      // 32 hex chars, null until ready
-  pubkeyHex:      () => string | null,      // 64 hex chars, null until ready
-  signedFetch:    (input, init) => Promise<Response>
-};
+window.QSCS_FEDERATED_IDENTITY_ORIGINS = ['https://reports.example.com'];
 ```
 
-`window.fetch` is the same as `window.qscsCrypto.signedFetch` after
-bootstrap. The original `fetch` is captured before the monkey-patch and used
-for cross-origin requests and for any post-failure fallback.
+Only exact HTTPS origins are accepted. Allowed requests sign the receiving
+hostname and omit its cookies. Configure issuer/audience trust on the nodes and
+CORS at the recipient, including the four signature headers. Browser configuration
+alone does not establish federation. Only include origins you control and trust.
 
-## When the gate carves things out for you
+## Browser and deployment considerations
 
-The QSCS substrate's identity gate exempts a fixed set of paths from
-signature enforcement so a fresh browser can bootstrap before it has an
-identity:
+Use HTTPS, WebAssembly, Web Crypto and IndexedDB. Your CSP must permit the SDK,
+its WASM fetch and WebAssembly compilation (typically `script-src 'self'
+'wasm-unsafe-eval'` and `connect-src 'self'`, plus explicit federation recipients).
 
-- `GET /` — your SPA shell
-- `/auth/*` — `status`, `login`, `logout`, `register`, password-reset
-- `POST /?api=register|forgot-password|verify-email|reset-password|resend-verification`
-- `/.well-known/*` — ACME, etc.
-- Static assets and anything under `[Static Pages]`
+The signer wraps the persisted key blob using a non-extractable Web Crypto
+AES-GCM key. Plaintext key material passes between WASM and JavaScript during
+loading and wrapping. Protect the page against injected scripts; WASM is not an
+isolation boundary against code running in the same page.
 
-Everything else requires a valid ed25519-signed request. If you see `401
-identity required` from the substrate, you are either:
+The SDK wraps `window.fetch`; it does not sign native form submissions, XHR,
+resource tags or full-page navigation. Keep the login shell and bootstrap assets
+public, and use signed fetches for protected APIs. QSCS has public bootstrap and
+static-asset exemptions; do not place private data in those paths. Automatic
+browser navigation and delta reconstruction are separate from identity signing.
 
-1. Hitting an endpoint that should be in the carve-out (open an issue), or
-2. Calling `fetch` from a context where `window.qscsCrypto` isn't installed
-   (a worker, an iframe with a different origin, a bookmarklet, etc.), or
-3. Constructing the body before `qscsCrypto.ready` resolved, so the body
-   carries empty `client_uuid` / `pubkey` and the server rejects it.
+Logout removes the serving node's origin binding and propagates revocation to
+peers. Allow for propagation across the cluster and federated recipients; clearing
+browser storage alone is not server-side logout.
 
-## Non-browser clients
+## Tests
 
-`qscs-crypto.js` is the browser binding. If you want to sign requests from
-a mobile app, a CLI, or a server-to-server integration, re-implement the
-wire format above against any ed25519 library. The signed string is exactly:
-
-```
-canonical = METHOD + "\n" + PATH + "\n" + TS + "\n" + NONCE + "\n" + SHA-256(body)
-```
-
-`PATH` is the request-line path (`/foo/bar?x=1`), `TS` is integer
-milliseconds since epoch, `NONCE` is 16 random bytes hex-encoded, `body` is
-the request body bytes (empty string if there is none). Sign `canonical`
-with your ed25519 private key, base64 the 64-byte signature, and send the
-four headers.
-
-## Browser support
-
-- Chrome / Edge / Brave / Opera / Samsung Internet — fine.
-- Firefox — fine.
-- Safari (desktop + iOS) — fine, but the WASM compile + IDB transaction
-  latency is meaningfully higher than other browsers. Always await
-  `qscsCrypto.ready` before any code that reads the cached identity.
-- Private / Incognito on iOS Safari — IndexedDB may be unavailable. The
-  shim falls through to unsigned `origFetch`, which the server will then
-  reject at the gate. Tell your users not to use private browsing on
-  identity-gated hosts, or detect the failure and surface a clear error.
-
-## Versioning
-
-The on-the-wire format is stable. The script and WASM blob are versioned
-together; treat them as a pair when you upgrade.
-
-| version  | md5 (dist/qscs-crypto.js)          | notes                                                              |
-|----------|------------------------------------|--------------------------------------------------------------------|
-| unreleased | — | current — opt-in, exact-origin federated identity signing; recipient cookies are omitted and IndexedDB identity readiness is awaited before the first signed request |
-| 10194d0  | `314bd10d5fc426bb4228e5359d39c06f` | grow WASM memory by 8 pages after load (fixes OOM on 2-page binary) |
-| fd300ae  | `b552168ab3f805ef5ff2c07018a530b8` | fix WASM allocator exhaustion; selfHeal reloads WASM               |
-| 3b6f0ad  | —                                  | previous production build                                          |
+Run `node --test tests/sdk.test.mjs` with Node.js 22 or later. Tests use the packaged
+WASM and verify its signatures independently with Web Crypto. The Core source
+repository's `tests/run-custom-identity-integration.py` runs the real listener
+against this SDK, a local credential verifier and a local application backend.
 
 ## Licence
 
