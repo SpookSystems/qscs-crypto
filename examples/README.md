@@ -39,6 +39,33 @@ Complete login first. Cross-origin use also requires the SDK's exact
 Use `Delta=all` for JSON; no private backend cache opt-in is required for browser
 delta transfer alone.
 
+### Automatic JSON-aware deltas
+
+The adapter checks the loaded WASM decoder's `qscs_delta_version()` export. A
+version of 2 or higher advertises `X-QSCS-Delta: 2`; a legacy decoder advertises
+`1`. Use the matching adapter and WASM from this repository with a QSCS Core
+that supports JSON byte deltas. No JSON-specific configuration switch or
+application serialization rewrite is needed. Existing `Delta=all` origin policy
+still controls whether JSON delta delivery is eligible.
+
+The Core can reuse unchanged JSON fields and array sections even in compact,
+single-line responses, preserving exact bytes, ordering, escapes and numbers.
+It compares candidate sizes and sends a full response if that is smaller.
+An unchanged response can use `nochange`. This reduces response transfer; it
+does not by itself cache database work or bypass request authorization.
+
+Deploy the helper and decoder together, serve WASM as `application/wasm`, and
+use versioned asset URLs or cache revalidation so browsers load the intended
+pair. Set `wasmUrl` to the deployed decoder URL. Older decoders retain legacy
+negotiation; missing decoders use full signed JSON. Do not manually advertise
+version 2 without a decoder that implements it.
+
+To verify, repeat the same authorized URL, then change a small part of its JSON.
+Inspect the request capability and baseline hash, the response mode and encoding,
+and actual response body bytes. Confirm the reconstructed JSON matches the
+origin response. Full responses during warm-up or for unsuitable changes are
+normal. See the public guide for deployment and verification details.
+
 Call `api.clear()` on logout, account changes and authorization-scope changes;
 abort your in-flight requests and keep authentication transitions serialized.
 Keep one representation per identity and URL. Include language, tenant or other

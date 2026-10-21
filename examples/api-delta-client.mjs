@@ -167,7 +167,7 @@ export function createApiDeltaClient({routes: routeInputs, wasmUrl: wasmInput = 
       headers.delete('X-QSCS-Base-Hash');
       headers.delete('X-QSCS-Base-Key');
       if (base && wasm) {
-        headers.set('X-QSCS-Delta', '1');
+        headers.set('X-QSCS-Delta', typeof wasm.exports.qscs_delta_version === 'function' && wasm.exports.qscs_delta_version() >= 2 ? '2' : '1');
         headers.set('X-QSCS-Base-Hash', base.hash);
       }
       function send(forceFull) {

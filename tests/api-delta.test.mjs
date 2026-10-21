@@ -5,7 +5,8 @@ import { webcrypto } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
-const wasmBytes = await readFile(new URL('../dist/qscs-substrate.wasm', import.meta.url));
+const wasmBytes = await readFile(process.env.QSCS_TEST_WASM || new URL('../dist/qscs-substrate.wasm', import.meta.url));
+const deltaVersion = WebAssembly.Module.exports(new WebAssembly.Module(wasmBytes)).some(e=>e.name==='qscs_delta_version') ? '2' : '1';
 const moduleSource = await readFile(new URL('../examples/api-delta-client.mjs', import.meta.url), 'utf8');
 const source = moduleSource.replace('export function createApiDeltaClient', 'function createApiDeltaClient') + `
 window.apiDelta = createApiDeltaClient({routes:['https://reports.example.com/api/reports', 'https://app.example.com/api/account']});`;
@@ -100,7 +101,7 @@ test('real WASM reconstructs full -> incremental -> nochange and preserves wire 
   assert.deepEqual(await changed.json(), { value: 2 });
   assert.equal(changed.headers.get('X-QSCS-Reconstructed'), '1');
   assert.equal(changed.headers.get('X-QSCS-Wire-Bytes'), String(packet('{"value":2}').length));
-  assert.equal(h.requests[1].headers.get('X-QSCS-Delta'), '1');
+  assert.equal(h.requests[1].headers.get('X-QSCS-Delta'), deltaVersion);
   assert.match(h.requests[1].headers.get('X-QSCS-Base-Hash'), /^[0-9a-f]{8}$/);
   const unchanged = await h.fetch();
   assert.deepEqual(await unchanged.json(), { value: 2 });
@@ -122,7 +123,7 @@ for (const [name, badResponse] of [
     await h.fetch();
     assert.deepEqual(await (await h.fetch()).json(), { value: 3 });
     assert.equal(h.requests.length, 3);
-    assert.equal(h.requests[1].headers.get('X-QSCS-Delta'), '1');
+    assert.equal(h.requests[1].headers.get('X-QSCS-Delta'), deltaVersion);
     assert.equal(h.requests[2].headers.has('X-QSCS-Delta'), false);
     assert.equal(h.requests[2].headers.has('X-QSCS-Base-Hash'), false);
   });
