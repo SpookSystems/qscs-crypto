@@ -56,6 +56,29 @@
     return Object.freeze(origins);
   }
   var FEDERATED_IDENTITY_ORIGINS = configuredFederatedOrigins();
+  var managedFederation = false, managedRecipients = [], federationChecked = 0, federationLoading = null;
+  function discoverFederation() {
+    if (federationLoading) return federationLoading;
+    federationChecked = Date.now();
+    var controller = new AbortController();
+    var timer = setTimeout(function () { controller.abort(); }, 3000);
+    federationLoading = origFetch('/auth/federation', {credentials:'same-origin',cache:'no-store',redirect:'error',signal:controller.signal})
+      .then(function (response) { if (!response.ok) throw new Error('Federation unavailable'); return response.json(); })
+      .then(function (policy) {
+        if (!policy || typeof policy.managed !== 'boolean' || !Array.isArray(policy.recipients)) throw new Error('Invalid federation policy');
+        // Once managed, an unavailable or expired policy never falls back to
+        // the application's older static allowlist.
+        if (policy.managed) managedFederation = true;
+        managedRecipients = policy.managed ? policy.recipients.filter(function (rule) {
+          if (!rule || typeof rule.origin !== 'string' || !Array.isArray(rule.paths) || rule.paths.length > 16) return false;
+          try { var u = new URL(rule.origin); if (u.protocol !== 'https:' || u.origin !== rule.origin || u.username || u.password) return false; } catch(e) { return false; }
+          return rule.paths.every(function (p) { return typeof p === 'string' && /^\/[A-Za-z0-9/_.-]*$/.test(p) && p.indexOf('..') === -1 && p.indexOf('//') === -1; });
+        }) : [];
+      }).catch(function () { managedRecipients = []; })
+      .finally(function () { clearTimeout(timer); federationLoading = null; });
+    return federationLoading;
+  }
+
 
   // Origin host for the canonical message.  Must match what the server
   // uses from the Host header, with the port removed.
@@ -435,7 +458,12 @@
     try {
       var parsed = new URL(url, window.location.href);
       sameOrigin = (parsed.origin === window.location.origin);
-      federatedOrigin = !sameOrigin && FEDERATED_IDENTITY_ORIGINS.indexOf(parsed.origin) !== -1;
+      if (!sameOrigin && Date.now() - federationChecked > 20000) {
+        return discoverFederation().then(function () { return signedFetch(input, init); });
+      }
+      federatedOrigin = !sameOrigin && (managedFederation
+        ? method === 'GET' && managedRecipients.some(function (r) { return r.origin === parsed.origin && r.paths.some(function(p) { return parsed.pathname.indexOf(p) === 0; }); })
+        : FEDERATED_IDENTITY_ORIGINS.indexOf(parsed.origin) !== -1);
       targetHost = parsed.hostname;
       url = parsed.pathname + parsed.search;
     } catch (e) {}

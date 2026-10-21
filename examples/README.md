@@ -33,8 +33,12 @@ if (!response.ok) throw new Error('Report request was not accepted');
 const report = await response.json();
 ```
 
-Complete login first. Cross-origin use also requires the SDK's exact
-`QSCS_FEDERATED_IDENTITY_ORIGINS` allowlist and node issuer/audience rules. See the
+Complete login first. For managed domains, configure the issuer, recipient and
+API paths under Identity federation in the control panel. The SDK discovers
+allowed recipients from the issuer's same-origin `/auth/federation` endpoint;
+Core still verifies every signed request. For unmanaged deployments, the exact
+`QSCS_FEDERATED_IDENTITY_ORIGINS` allowlist and local issuer/audience rules remain
+available. See the
 [API delta guide](https://spooksystems.io/documentation/delta-api/) for configuration.
 Use `Delta=all` for JSON; no private backend cache opt-in is required for browser
 delta transfer alone.

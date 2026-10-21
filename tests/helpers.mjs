@@ -23,11 +23,12 @@ export async function setup(storage = new Map(), configuration = {}) {
     });
     return request;
   }};
-  const context = vm.createContext({console,crypto:webcrypto,indexedDB,WebAssembly,TextEncoder,TextDecoder,Uint8Array,ArrayBuffer,Headers,Request,Response,URL,URLSearchParams,FormData,
+  const context = vm.createContext({console,crypto:webcrypto,indexedDB,WebAssembly,TextEncoder,TextDecoder,Uint8Array,ArrayBuffer,AbortController,Headers,Request,Response,URL,URLSearchParams,FormData,
     setTimeout:(cb,ms)=>{const t=setTimeout(cb,ms);t.unref();return t;}, clearTimeout,
     location:{origin:'https://app.example.test',host:'app.example.test',href:'https://app.example.test/control-panel/',search:''},
     fetch:async (url,options)=>{
       if(String(url).endsWith('/wasm/qscs-substrate.wasm') || String(url).endsWith('/assets/identity.wasm')) return new Response(wasm,{headers:{'Content-Type':'application/wasm'}});
+      if (String(url)==='/auth/federation') return new Response(JSON.stringify(configuration.federationPolicy || {managed:false,recipients:[]}));
       requests.push({url,options}); return new Response('{}');
     }
   });

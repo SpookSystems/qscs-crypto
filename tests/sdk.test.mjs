@@ -75,3 +75,18 @@ test('federated auth/status remains signed and omits recipient cookies',async()=
  assert.equal(h.requests[0].options.credentials,'omit');
  await verify(h,h.requests[0],Buffer.alloc(0),'GET','https://reports.example.test/auth/status');
 });
+test('managed federation discovers permitted GET paths and supersedes static recipients',async()=>{
+ const h=await setup(new Map(),{QSCS_FEDERATED_IDENTITY_ORIGINS:['https://old.example.test'],federationPolicy:{managed:true,recipients:[{origin:'https://api.example.test',paths:['/api/reports/']}]}});
+ await h.signer.signedFetch('https://api.example.test/api/reports/1');
+ assert.ok(h.requests[0].options.headers.get('X-QSCS-Sig'));assert.equal(h.requests[0].options.credentials,'omit');
+ await h.signer.signedFetch('https://api.example.test/api/admin');
+ assert.equal(h.requests[1].options.headers,undefined);
+ await h.signer.signedFetch('https://old.example.test/api/reports/1');
+ assert.equal(h.requests[2].options.headers,undefined);
+ await h.signer.signedFetch('https://api.example.test/api/reports/1',{method:'POST',body:'{}'});
+ assert.equal(h.requests[3].options.headers,undefined);
+});
+test('managed recipient discovery rejects credentials and malformed destination paths',async()=>{
+ const h=await setup(new Map(),{federationPolicy:{managed:true,recipients:[{origin:'https://user@api.example.test',paths:['/']},{origin:'https://api.example.test',paths:['/api/../admin']}]}});
+ await h.signer.signedFetch('https://api.example.test/api/reports');assert.equal(h.requests[0].options.headers,undefined);
+});

@@ -205,3 +205,11 @@ against this SDK, a local credential verifier and a local application backend.
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
+
+### Managed domain federation
+
+Configure a directed origin relationship in the control panel's **Identity federation** section. Choose the login origin, API origin and permitted paths. The console distributes both sides to the domain nodes; no daemon file editing is needed. Node acknowledgements distinguish a saved relationship from one applied throughout both domains.
+
+Before signing cross-origin requests, the SDK reads the same-origin `/auth/federation` policy, refreshing it at most every 20 seconds. Managed rules restrict signing to GET requests under the returned paths. Recipient cookies are omitted. The API node independently verifies the identity and signature; browser discovery is not authorization. After observing managed policy, unavailable discovery does not restore an older static allowlist. Same-origin signing is unchanged.
+
+For standalone configurations without managed federation, the existing explicit origin allowlist remains supported. Application API routes, login integration and resource-level permissions remain the application's responsibility.
