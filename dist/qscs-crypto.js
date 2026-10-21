@@ -458,7 +458,7 @@
     try {
       var parsed = new URL(url, window.location.href);
       sameOrigin = (parsed.origin === window.location.origin);
-      if (!sameOrigin && Date.now() - federationChecked > 20000) {
+      if (!sameOrigin && (federationLoading || Date.now() - federationChecked > 20000)) {
         return discoverFederation().then(function () { return signedFetch(input, init); });
       }
       federatedOrigin = !sameOrigin && (managedFederation
